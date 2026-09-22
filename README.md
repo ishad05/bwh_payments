@@ -23,8 +23,8 @@ owns that half.
 ### Setup
 
 1. `bench get-app https://github.com/Rl0007/bwh_payments && bench --site <site> install-app bwh_payments`
-2. Fill in `Stripe Gateway Settings` (or `Telr Gateway Settings`). The Stripe webhook secret is
-   mandatory — an unverified webhook is an "anyone can mark an order paid" hole.
+2. Fill in the settings Single for the gateway you are enabling. Every required webhook credential must
+   come from that gateway; a placeholder is not valid.
 3. Create a `Payment Gateway Profile` named after the gateway, pointing at that settings DocType, and
    enable it. Its name is what the storefront sends and what the matching `Mode of Payment` must be
    called.
@@ -67,7 +67,8 @@ other call having succeeded rather than as a failure.
 PayPal signs its webhooks with a certificate rather than a shared secret, so there is nothing to verify
 locally: every delivery is verified by calling `POST /v1/notifications/verify-webhook-signature` back at
 PayPal. That needs the **Webhook ID** from the PayPal dashboard, which is an identifier and not a secret.
-Subscribe the webhook to `CHECKOUT.ORDER.APPROVED` and `PAYMENT.CAPTURE.COMPLETED`.
+Subscribe the webhook to `CHECKOUT.ORDER.APPROVED` and `PAYMENT.CAPTURE.COMPLETED`. Save the ID returned
+by PayPal, not the webhook name or a placeholder.
 
 Amounts go to PayPal as major-unit decimal strings. HUF and TWD are two-decimal currencies under ISO
 4217 but whole-only at PayPal, so a fractional charge in them is refused rather than rounded.

@@ -17,6 +17,27 @@ RAZORPAY_GATEWAY = "Razorpay"
 RAZORPAY_WEBHOOK_SECRET = "rzp_whsec_test_secret"
 SUCCESS_URL = "https://shop.test/en/account/orders/confirmation"
 
+SETTINGS_FIELDS = (
+	"enabled",
+	"test_mode",
+	"treat_authorised_as_paid",
+	"send_razorpay_notifications",
+	"key_id",
+	"key_secret",
+	"webhook_secret",
+	"currency",
+	"success_url",
+	"failure_url",
+	"cancelled_url",
+)
+# Read back through `get_password`, not off the document: a Password field holds a mask on the loaded doc
+# and its real value lives in `__Auth`.
+SETTINGS_PASSWORD_FIELDS = ("key_secret", "webhook_secret")
+
+# What this site had before the suite overwrote it. Without the snapshot, teardown blanks the credentials
+# of a site that has a real Razorpay account configured, and there is no undo.
+_original_state = {}
+
 # None of these links are exercised here, and generating their fixtures drags in ERPNext's whole test
 # bootstrap for no benefit.
 IGNORE_TEST_RECORD_DEPENDENCIES = [
@@ -29,6 +50,7 @@ IGNORE_TEST_RECORD_DEPENDENCIES = [
 
 def configure_razorpay_gateway():
 	settings = frappe.get_single("Razorpay Gateway Settings")
+	remember_original_state(settings)
 	settings.update(
 		{
 			"enabled": 1,
@@ -56,8 +78,32 @@ def configure_razorpay_gateway():
 		).insert(ignore_permissions=True)
 
 
+def remember_original_state(settings):
+	"""Snapshot what the site had before the suite overwrites it, so teardown can put it back.
+
+	Blanking unconditionally is the obvious wrong move: on a site where Razorpay is genuinely configured
+	it silently takes a working payment method off the storefront, and there is no undo.
+	"""
+	if _original_state:
+		return
+
+	# None when the profile does not exist at all, which is how teardown tells "the suite created this"
+	# from "the site already had it".
+	_original_state["profile_enabled"] = frappe.db.get_value(
+		"Payment Gateway Profile", RAZORPAY_GATEWAY, "enabled"
+	)
+	snapshot = {
+		field: settings.get(field)
+		for field in SETTINGS_FIELDS
+		if field not in SETTINGS_PASSWORD_FIELDS
+	}
+	for field in SETTINGS_PASSWORD_FIELDS:
+		snapshot[field] = settings.get_password(field, raise_exception=False)
+	_original_state["settings"] = snapshot
+
+
 def remove_razorpay_gateway():
-	"""Undo configure_razorpay_gateway.
+	"""Undo configure_razorpay_gateway, restoring whatever the site had before rather than blanking it.
 
 	This matters more here than it does for Stripe: the Razorpay controller calls `create_request_log` on
 	every single HTTP call, and that helper ends in an unconditional `frappe.db.commit()`. So every test
@@ -80,28 +126,44 @@ def remove_razorpay_gateway():
 				"Integration Request", log_name, ignore_permissions=True, delete_permanently=True
 			)
 
-	frappe.delete_doc(
-		"Payment Gateway Profile",
-		RAZORPAY_GATEWAY,
-		ignore_missing=True,
-		ignore_permissions=True,
-		force=True,
-	)
-	# set_single_value, not save(): the keys are mandatory, so blanking them cannot go through validation.
-	frappe.db.set_single_value(
-		"Razorpay Gateway Settings",
-		{
-			"enabled": 0,
-			"key_id": "",
-			"key_secret": "",
-			"webhook_secret": "",
-			"currency": "",
-			"success_url": "",
-			"failure_url": "",
-			"cancelled_url": "",
-		},
-	)
+	restore_razorpay_profile()
+	restore_razorpay_settings()
 	frappe.clear_cache(doctype="Razorpay Gateway Settings")
+
+
+def restore_razorpay_profile():
+	original_enabled = _original_state.get("profile_enabled")
+	if original_enabled is None:
+		frappe.delete_doc(
+			"Payment Gateway Profile",
+			RAZORPAY_GATEWAY,
+			ignore_missing=True,
+			ignore_permissions=True,
+			force=True,
+		)
+		return
+
+	# The site had this profile before the suite ran, so its switch goes back rather than the row going away.
+	frappe.db.set_value("Payment Gateway Profile", RAZORPAY_GATEWAY, "enabled", original_enabled)
+
+
+def restore_razorpay_settings():
+	original = _original_state.get("settings") or {}
+	if not original.get("key_id"):
+		# Nothing was configured here before. set_single_value, not save(): the keys are mandatory, so a
+		# blank state cannot go through validation.
+		frappe.db.set_single_value(
+			"Razorpay Gateway Settings",
+			{field: "" for field in SETTINGS_FIELDS} | {"enabled": 0},
+		)
+		return
+
+	# A real account was configured before the suite overwrote it. Going through the ORM is what puts a
+	# Password field back into `__Auth`; set_single_value would leave the secret in plain text in
+	# `tabSingles` and the gateway unable to authenticate.
+	settings = frappe.get_single("Razorpay Gateway Settings")
+	settings.update(original)
+	settings.save(ignore_permissions=True)
 
 
 def make_razorpay_payment_request(amount: float, currency: str = "INR"):
